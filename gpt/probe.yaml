@@ -1,0 +1,10 @@
+probe:
+  task_signature: word_pair # word, word_pair
+  task_name: parse-distance
+  maximum_rank: 32
+  psd_parameters: True
+  diagonal: False
+  params_path: predictor.params
+probe_training:
+  epochs: 30
+  loss: L1

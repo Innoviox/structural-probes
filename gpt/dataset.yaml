@@ -1,0 +1,25 @@
+dataset:
+  observation_fieldnames:
+    - index
+    - sentence
+    - lemma_sentence
+    - upos_sentence
+    - xpos_sentence
+    - morph
+    - head_indices
+    - governance_relations
+    - secondary_relations
+    - extra_info
+    - embeddings
+  corpus:
+    root: example/data/en_ewt-ud-sample/
+    train_path: en_ewt-ud-train.conllu
+    dev_path: en_ewt-ud-dev.conllu
+    test_path: en_ewt-ud-test.conllu
+  embeddings:
+    type: token #{token,subword}
+    root: example/data/en_ewt-ud-sample/
+    train_path: en_ewt-ud-train.elmo-layers.hdf5
+    dev_path: en_ewt-ud-dev.elmo-layers.hdf5
+    test_path: en_ewt-ud-test.elmo-layers.hdf5
+  batch_size: 40

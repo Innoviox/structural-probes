@@ -1,8 +1,8 @@
 model:
   hidden_dim: 1024 # hidden dim
-  model_type: BERT-disk # BERT-disk, ELMo-disk, 
+  model_type: BERT-disk # BERT-disk, ELMo-disk,
   use_disk: False
-  model_layer: 16 # BERT-base: {1,...,12}; ELMo: {1,2,3}
+  model_layer: 9 # BERT-base: {1,...,12}; ELMo: {1,2,3}
 probe:
   task_name: demo
   maximum_rank: 1024
@@ -11,4 +11,3 @@ probe:
   distance_params_path: example/data/bertlarge16-distance-probe.params
 reporting:
   root: example/results
-

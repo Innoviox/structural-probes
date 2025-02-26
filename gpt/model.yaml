@@ -1,0 +1,9 @@
+model:
+  hidden_dim: 1024 # ELMo hidden dim
+  #embedding_dim: 1024 # ELMo word embedding dim
+  model_type: GPT-2-disk # BERT-disk, ELMo-disk,
+  tokenizer:
+    type: word
+    vocab_path: example/vocab.vocab
+  use_disk: True
+  model_layer: 2 # BERT-base: {1,...,12}; ELMo: {1,2,3}
