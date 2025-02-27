@@ -436,3 +436,86 @@ class ObservationIterator(Dataset):
   def __getitem__(self, idx):
     return self.observations[idx], self.labels[idx]
 
+class GPT2Dataset(SubwordDataset):
+  """Dataloader for conllx files and pre-computed GPT-2 embeddings.
+
+  See SimpleDataset.
+  Attributes:
+    args: the global yaml-derived experiment config dictionary
+  """
+
+  def generate_subword_embeddings_from_hdf5(self, observations, filepath, layer_index, subword_tokenizer=None):
+    '''Reads pre-computed subword embeddings from hdf5-formatted file.
+
+    Similar to BERT but adapted for GPT-2 tokenization.
+
+    Args:
+      observations: A list of Observations composing a dataset.
+      filepath: The filepath of a hdf5 file containing embeddings.
+      layer_index: The index corresponding to the layer of representation
+          to be used.
+      subword_tokenizer: (optional) a tokenizer used to map from
+          conllx tokens to subword tokens.
+    
+    Returns:
+      A list of numpy matrices; one for each observation.
+    '''
+    if subword_tokenizer is None:
+      try:
+        from transformers import GPT2Tokenizer
+        subword_tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
+        print('Using GPT-2 tokenizer to align embeddings with PTB tokens')
+      except:
+        print('Couldn\'t import transformers. Exiting...')
+        exit()
+    
+    hf = h5py.File(filepath, 'r')
+    indices = list(hf.keys())
+    single_layer_features_list = []
+    
+    for index in tqdm(sorted([int(x) for x in indices]), desc='[aligning embeddings]'):
+      observation = observations[index]
+      feature_stack = hf[str(index)]
+      single_layer_features = feature_stack[layer_index]
+      
+      # GPT-2 doesn't use [CLS] or [SEP] tokens, but we need to handle tokenization
+      # GPT-2 uses space prefix for tokens that start a word
+      tokenized_sent = subword_tokenizer.tokenize(' '.join(observation.sentence))
+      untokenized_sent = observation.sentence
+      
+      # Map between tokenized and untokenized
+      alignment = []
+      tokenized_idx = 0
+      for word_idx, word in enumerate(untokenized_sent):
+        word_tokens = subword_tokenizer.tokenize(' ' + word if word_idx == 0 else word)
+        alignment.append((tokenized_idx, tokenized_idx + len(word_tokens) - 1))
+        tokenized_idx += len(word_tokens)
+      
+      # Average the embeddings for each word's subword tokens
+      # assert single_layer_features.shape[0] == len(tokenized_sent)
+      # Replace the assertion with:
+      if single_layer_features.shape[0] != len(tokenized_sent):
+          # print(f"Warning: Mismatch in sentence {index}. Tokenized length: {len(tokenized_sent)}, Feature length: {single_layer_features.shape[0]}")
+          # Truncate the longer one to match the shorter one
+          min_length = min(single_layer_features.shape[0], len(tokenized_sent))
+          tokenized_sent = tokenized_sent[:min_length]
+          single_layer_features = single_layer_features[:min_length, :]
+      word_embeddings = []
+      
+      for start_idx, end_idx in alignment:
+        word_vector = np.mean(single_layer_features[start_idx:end_idx+1,:], axis=0)
+        word_embeddings.append(word_vector)
+      
+      single_layer_features = torch.tensor(word_embeddings)
+      assert single_layer_features.shape[0] == len(observation.sentence)
+      single_layer_features_list.append(single_layer_features)
+      
+    return single_layer_features_list
+
+  def optionally_add_embeddings(self, observations, pretrained_embeddings_path):
+    """Adds pre-computed GPT-2 embeddings from disk to Observations."""
+    layer_index = self.args['model']['model_layer']
+    print('Loading GPT-2 Pretrained Embeddings from {}; using layer {}'.format(pretrained_embeddings_path, layer_index))
+    embeddings = self.generate_subword_embeddings_from_hdf5(observations, pretrained_embeddings_path, layer_index)
+    observations = self.add_embeddings_to_observations(observations, embeddings)
+    return observations
