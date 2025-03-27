@@ -59,6 +59,8 @@ def choose_dataset_class(args):
     dataset_class = data.BERTDataset
   elif args['model']['model_type'] == 'GPT2-disk':
     dataset_class = data.GPT2Dataset
+  elif args['model']['model_type'] == 'deepseek':
+    dataset_class = data.DeepSeekDataset
   else:
     raise ValueError("Unknown model type for datasets: {}".format(
       args['model']['model_type']))
@@ -100,6 +102,8 @@ def choose_model_class(args):
   elif args['model']['model_type'] == 'BERT-disk':
     return model.DiskModel
   elif args['model']['model_type'] == 'GPT2-disk':
+    return model.DiskModel
+  elif args['model']['model_type'] == 'deepseek':
     return model.DiskModel
   elif args['model']['model_type'] == 'ELMo-random-projection':
     return model.ProjectionModel

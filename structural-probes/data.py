@@ -13,6 +13,7 @@ from tqdm import tqdm
 import torch
 import torch.nn as nn
 import h5py
+import pickle
 
 
 class SimpleDataset:
@@ -32,9 +33,9 @@ class SimpleDataset:
     self.vocab = vocab
     self.observation_class = self.get_observation_class(self.args['dataset']['observation_fieldnames'])
     self.train_obs, self.dev_obs, self.test_obs = self.read_from_disk()
-    self.train_dataset = ObservationIterator(self.train_obs, task)
-    self.dev_dataset = ObservationIterator(self.dev_obs, task)
-    self.test_dataset = ObservationIterator(self.test_obs, task)
+    self.train_dataset = ObservationIterator(self.train_obs, task, 'train')
+    self.dev_dataset = ObservationIterator(self.dev_obs, task, 'dev')
+    self.test_dataset = ObservationIterator(self.test_obs, task, 'test')
 
   def read_from_disk(self):
     '''Reads observations from conllx-formatted files
@@ -415,8 +416,9 @@ class ObservationIterator(Dataset):
   Used as the iterator for a PyTorch dataloader.
   """
 
-  def __init__(self, observations, task):
+  def __init__(self, observations, task, name):
     self.observations = observations
+    self.name = name
     self.set_labels(observations, task)
 
   def set_labels(self, observations, task):
@@ -426,9 +428,17 @@ class ObservationIterator(Dataset):
       observations: A list of observations describing a dataset
       task: a Task object which takes Observations and constructs labels.
     """
+    if os.path.exists(self.name + '_labels.pkl'):
+      with open(self.name + '_labels.pkl', 'rb') as f:
+        self.labels = pickle.load(f)
+      print('Loaded labels from disk')
+      return
     self.labels = []
     for observation in tqdm(observations, desc='[computing labels]'):
       self.labels.append(task.labels(observation))
+    with open(self.name + '_labels.pkl', 'wb') as f:
+      pickle.dump(self.labels, f)
+    print('Saved labels to disk')
 
   def __len__(self):
     return len(self.observations)
@@ -519,3 +529,168 @@ class GPT2Dataset(SubwordDataset):
     embeddings = self.generate_subword_embeddings_from_hdf5(observations, pretrained_embeddings_path, layer_index)
     observations = self.add_embeddings_to_observations(observations, embeddings)
     return observations
+  
+import os
+from collections import namedtuple, defaultdict
+import numpy as np
+from tqdm import tqdm
+import torch
+import torch.nn as nn
+import h5py
+from torch.utils.data import DataLoader, Dataset
+
+
+class DeepSeekDataset(SubwordDataset):
+    """Dataloader for conllx files and pre-computed DeepSeek embeddings.
+
+    Specifically designed for DeepSeek-R1-Distill-Qwen-1.5B embeddings.
+    This model is a distilled version of DeepSeek-R1 from the Qwen2.5-Math-1.5B base.
+    See SimpleDataset for more general information on dataset structure.
+
+    Attributes:
+        args: the global yaml-derived experiment config dictionary
+    """
+
+    def generate_subword_embeddings_from_hdf5(self, observations, filepath, layer_index, subword_tokenizer=None):
+        '''Reads pre-computed subword embeddings from hdf5-formatted file.
+
+        For DeepSeek-R1-Distill-Qwen-1.5B which uses Qwen tokenization.
+        The model has 24 layers (0-23), so layer_index should be in this range.
+
+        Args:
+            observations: A list of Observations composing a dataset.
+            filepath: The filepath of a hdf5 file containing embeddings.
+            layer_index: The index corresponding to the layer of representation
+                to be used. (e.g., 0, 12, 23 for different layers)
+            subword_tokenizer: (optional) a tokenizer used to map from
+                conllx tokens to subword tokens.
+        
+        Returns:
+            A list of numpy matrices; one for each observation.
+        '''
+        if subword_tokenizer is None:
+            try:
+                from transformers import AutoTokenizer
+                subword_tokenizer = AutoTokenizer.from_pretrained('deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B', trust_remote_code=True)
+                print('Using DeepSeek-R1-Distill-Qwen-1.5B tokenizer to align embeddings with tokens')
+            except:
+                print('Couldn\'t import transformers or load the DeepSeek tokenizer. Exiting...')
+                exit()
+        
+        hf = h5py.File(filepath, 'r')
+        indices = list(hf.keys())
+        single_layer_features_list = []
+        
+        for index in tqdm(sorted([int(x) for x in indices]), desc='[aligning DeepSeek embeddings]'):
+            observation = observations[index]
+            feature_stack = hf[str(index)]
+            single_layer_features = feature_stack[layer_index]
+            
+            # Qwen models use <|endoftext|> as special tokens rather than [CLS]/[SEP]
+            tokenized_sent = subword_tokenizer.tokenize('<|endoftext|>' + ' '.join(observation.sentence) + '<|endoftext|>')
+            untokenized_sent = observation.sentence
+            
+            # Create mappings between tokenized and untokenized tokens
+            # Qwen tokenizer uses a different subword system than BERT/GPT2
+            alignment = []
+            tokenized_idx = 1  # Skip the first special token
+            
+            for word_idx, word in enumerate(untokenized_sent):
+                word_tokens = subword_tokenizer.tokenize(' ' + word if word_idx == 0 else word)
+                if not word_tokens:  # Handle case where tokenizer returns empty list for a word
+                    word_tokens = [subword_tokenizer.unk_token]
+                
+                start_idx = tokenized_idx
+                end_idx = tokenized_idx + len(word_tokens) - 1
+                alignment.append((start_idx, end_idx))
+                tokenized_idx += len(word_tokens)
+            
+            # Handle potential mismatches in lengths (common with different tokenizers)
+            if single_layer_features.shape[0] != len(tokenized_sent):
+                min_length = min(single_layer_features.shape[0], len(tokenized_sent))
+                tokenized_sent = tokenized_sent[:min_length]
+                single_layer_features = single_layer_features[:min_length, :]
+                
+                # Adjust alignments if necessary
+                valid_alignments = [align for align in alignment if align[1] < min_length]
+                if len(valid_alignments) < len(alignment):
+                    alignment = valid_alignments
+            
+            # Average embeddings for each word's subword tokens
+            word_embeddings = []
+            for start_idx, end_idx in alignment:
+                if start_idx < single_layer_features.shape[0] and end_idx < single_layer_features.shape[0]:
+                    word_vector = np.mean(single_layer_features[start_idx:end_idx+1,:], axis=0)
+                    word_embeddings.append(word_vector)
+            
+            # Handle edge case where we don't have enough embeddings
+            if len(word_embeddings) < len(observation.sentence):
+                # print(f"Warning: Not enough embeddings for sentence {index}. Expected {len(observation.sentence)}, got {len(word_embeddings)}")
+                # Pad with zeros or repeat last embedding
+                while len(word_embeddings) < len(observation.sentence):
+                    if word_embeddings:
+                        word_embeddings.append(word_embeddings[-1])
+                    else:
+                        # If no embeddings at all, use zeros
+                        word_embeddings.append(np.zeros(single_layer_features.shape[1]))
+            
+            single_layer_features = torch.tensor(word_embeddings)
+            assert single_layer_features.shape[0] == len(observation.sentence)
+            single_layer_features_list.append(single_layer_features)
+            
+        return single_layer_features_list
+
+    def optionally_add_embeddings(self, observations, pretrained_embeddings_path):
+        """Adds pre-computed DeepSeek embeddings from disk to Observations."""
+        layer_index = self.args['model']['model_layer']
+        print('Loading DeepSeek-R1-Distill-Qwen-1.5B Pretrained Embeddings from {}; using layer {}'.format(
+            pretrained_embeddings_path, layer_index))
+        embeddings = self.generate_subword_embeddings_from_hdf5(observations, pretrained_embeddings_path, layer_index)
+        observations = self.add_embeddings_to_observations(observations, embeddings)
+        return observations
+    
+    @staticmethod
+    def match_tokenized_to_untokenized(tokenized_sent, untokenized_sent):
+        '''Aligns tokenized and untokenized sentence for DeepSeek tokenization
+
+        DeepSeek's tokenizer (based on Qwen) uses a different subword system,
+        so we need custom alignment logic to match tokens properly.
+
+        Args:
+            tokenized_sent: a list of strings describing a subword-tokenized sentence
+            untokenized_sent: a list of strings describing a sentence, no subword tok.
+            
+        Returns:
+            A dictionary of type {int: list(int)} mapping each untokenized sentence
+            index to a list of subword-tokenized sentence indices
+        '''
+        mapping = defaultdict(list)
+        untokenized_sent_index = 0
+        tokenized_sent_index = 1  # Skip first special token
+        
+        # For DeepSeek/Qwen tokenization, we need a more robust matching approach
+        while (untokenized_sent_index < len(untokenized_sent) and 
+               tokenized_sent_index < len(tokenized_sent)):
+            
+            # Get the current word and its first character
+            current_word = untokenized_sent[untokenized_sent_index]
+            mapping[untokenized_sent_index].append(tokenized_sent_index)
+            
+            # Handle special characters and multi-token words
+            if tokenized_sent_index + 1 < len(tokenized_sent):
+                next_token = tokenized_sent[tokenized_sent_index + 1]
+                if (next_token.startswith('▁') or  # Qwen/DeepSeek specific marker
+                    next_token.startswith('Ġ')):   # Some Qwen tokenizers use this
+                    # New word starts
+                    untokenized_sent_index += 1
+                    tokenized_sent_index += 1
+                else:
+                    # Continue of the same word
+                    mapping[untokenized_sent_index].append(tokenized_sent_index + 1)
+                    tokenized_sent_index += 1
+            else:
+                # End of tokenized sentence
+                untokenized_sent_index += 1
+                tokenized_sent_index += 1
+                
+        return mapping
