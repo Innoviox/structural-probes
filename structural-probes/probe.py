@@ -2,6 +2,7 @@
 
 import torch.nn as nn
 import torch
+# import memory
 
 class Probe(nn.Module):
   pass
@@ -23,27 +24,34 @@ class TwoWordPSDProbe(Probe):
     self.to(args['device'])
 
   def forward(self, batch):
-    """ Computes all n^2 pairs of distances after projection
-    for each sentence in a batch.
-
-    Note that due to padding, some distances will be non-zero for pads.
-    Computes (B(h_i-h_j))^T(B(h_i-h_j)) for all i,j
-
-    Args:
-      batch: a batch of word representations of the shape
-        (batch_size, max_seq_len, representation_dim)
-    Returns:
-      A tensor of distances of shape (batch_size, max_seq_len, max_seq_len)
-    """
-    transformed = torch.matmul(batch, self.proj)
-    batchlen, seqlen, rank = transformed.size()
-    transformed = transformed.unsqueeze(2)
-    transformed = transformed.expand(-1, -1, seqlen, -1)
-    transposed = transformed.transpose(1,2)
-    diffs = transformed - transposed
-    squared_diffs = diffs.pow(2)
-    squared_distances = torch.sum(squared_diffs, -1)
-    return squared_distances
+      """Compute distances in chunks to minimize memory usage."""
+      cpu_batch = batch.cpu()
+      cpu_proj = self.proj.cpu()
+      transformed = torch.matmul(batch, self.proj)
+      batchlen, seqlen, rank = transformed.size()
+      
+      # Pre-allocate the output tensor
+      squared_distances = torch.zeros(batchlen, seqlen, seqlen, device=transformed.device)
+      
+      # Process in chunks to reduce memory footprint
+      chunk_size = min(32, seqlen)  # Adjust based on your memory constraints
+      
+      for i in range(0, seqlen, chunk_size):
+          end_i = min(i + chunk_size, seqlen)
+          chunk_i = transformed[:, i:end_i, :]
+          
+          for j in range(0, seqlen, chunk_size):
+              end_j = min(j + chunk_size, seqlen)
+              chunk_j = transformed[:, j:end_j, :]
+              
+              # Compute pairwise distances between chunks
+              chunk_i_expanded = chunk_i.unsqueeze(2).expand(-1, -1, end_j-j, -1)
+              chunk_j_expanded = chunk_j.unsqueeze(1).expand(-1, end_i-i, -1, -1)
+              diffs = chunk_i_expanded - chunk_j_expanded
+              squared_diffs = diffs.pow(2)
+              squared_distances[:, i:end_i, j:end_j] = torch.sum(squared_diffs, -1)
+      
+      return squared_distances.to(batch.device)
 
 
 

@@ -107,11 +107,8 @@ def report_on_stdin(args):
   """
 
   # Define the BERT model and tokenizer
-  # tokenizer = BertTokenizer.from_pretrained('bert-large-cased')
-  # model = BertModel.from_pretrained('bert-large-cased')
-  tokenizer = torch.hub.load('huggingface/pytorch-transformers', 'tokenizer', 'gpt-2')    # Download model and configuration from S3 and cache.
-  model = torch.hub.load('huggingface/pytorch-transformers', 'model', 'gpt-2')    # Download model and configuration from S3 and cache.
-
+  tokenizer = BertTokenizer.from_pretrained('bert-large-cased')
+  model = BertModel.from_pretrained('bert-large-cased')
   LAYER_COUNT = 24
   FEATURE_COUNT = 1024
   model.to(args['device'])
@@ -128,7 +125,7 @@ def report_on_stdin(args):
   for index, line in tqdm(enumerate(sys.stdin), desc='[demoing]'):
     # Tokenize the sentence and create tensor inputs to BERT
     untokenized_sent = line.strip().split()
-    tokenized_sent = tokenizer.tokenize('[CLS] ' + ' '.join(line.strip().split()) + ' [SEP]')
+    tokenized_sent = tokenizer.wordpiece_tokenizer.tokenize('[CLS] ' + ' '.join(line.strip().split()) + ' [SEP]')
     untok_tok_mapping = data.SubwordDataset.match_tokenized_to_untokenized(tokenized_sent, untokenized_sent)
 
     indexed_tokens = tokenizer.convert_tokens_to_ids(tokenized_sent)
@@ -140,33 +137,24 @@ def report_on_stdin(args):
     tokens_tensor = tokens_tensor.to(args['device'])
     segments_tensors = segments_tensors.to(args['device'])
 
-    # print(tokens_tensor)
-    # print(segments_tensors)
-    # a = model(tokens_tensor, segments_tensors)[0]
-    # print(a)
-    # import pdb; pdb.set_trace();
-    # breakpoint()
-    # with torch.no_grad():
-    # Run sentence tensor through BERT after averaging subwords for each token
-    encoded_layers = model(tokens_tensor, segments_tensors)[0][0, :]
-    # print(type(model), type(encoded_layers))
-    single_layer_features = encoded_layers[args['model']['model_layer']]
-    print("single", encoded_layers, single_layer_features)
-    print(untok_tok_mapping, untokenized_sent)
-    # import pdb; pdb.set_trace()
-    representation = torch.stack([torch.mean(single_layer_features[untok_tok_mapping[i][0]:untok_tok_mapping[i][-1]+1], dim=0) for i in range(len(untokenized_sent))], dim=0)
-    representation = representation.view(1, *representation.size())
 
-    # Run BERT token vectors through the trained probes
-    distance_predictions = distance_probe(representation.to(args['device'])).detach().cpu()[0][:len(untokenized_sent),:len(untokenized_sent)].numpy()
-    depth_predictions = depth_probe(representation).detach().cpu()[0][:len(untokenized_sent)].numpy()
+    with torch.no_grad():
+      # Run sentence tensor through BERT after averaging subwords for each token
+      encoded_layers, _ = model(tokens_tensor, segments_tensors)
+      single_layer_features = encoded_layers[args['model']['model_layer']]
+      representation = torch.stack([torch.mean(single_layer_features[0,untok_tok_mapping[i][0]:untok_tok_mapping[i][-1]+1,:], dim=0) for i in range(len(untokenized_sent))], dim=0)
+      representation = representation.view(1, *representation.size())
 
-    # Print results visualizations
-    print_distance_image(args, untokenized_sent, distance_predictions, index)
-    print_depth_image(args, untokenized_sent, depth_predictions, index)
+      # Run BERT token vectors through the trained probes
+      distance_predictions = distance_probe(representation.to(args['device'])).detach().cpu()[0][:len(untokenized_sent),:len(untokenized_sent)].numpy()
+      depth_predictions = depth_probe(representation).detach().cpu()[0][:len(untokenized_sent)].numpy()
 
-    predicted_edges = reporter.prims_matrix_to_edges(distance_predictions, untokenized_sent, untokenized_sent)
-    print_tikz(args, predicted_edges, untokenized_sent)
+      # Print results visualizations
+      print_distance_image(args, untokenized_sent, distance_predictions, index)
+      print_depth_image(args, untokenized_sent, depth_predictions, index)
+
+      predicted_edges = reporter.prims_matrix_to_edges(distance_predictions, untokenized_sent, untokenized_sent)
+      print_tikz(args, predicted_edges, untokenized_sent)
 
 
 if __name__ == '__main__':

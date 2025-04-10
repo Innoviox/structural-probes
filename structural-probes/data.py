@@ -255,9 +255,9 @@ class SimpleDataset:
           Observation batch (not padded)
     '''
     if self.use_disk_embeddings:
-      seqs = [torch.tensor(x[0].embeddings, device=self.args['device']) for x in batch_observations]
+      seqs = [x[0].embeddings.detach().clone().to(self.args['device']) for x in batch_observations]
     else:
-      seqs = [torch.tensor(x[0].sentence, device=self.args['device']) for x in batch_observations]
+      seqs = [x[0].sentence.detach().clone().to(self.args['device']) for x in batch_observations]
     lengths = torch.tensor([len(x) for x in seqs], device=self.args['device'])
     seqs = nn.utils.rnn.pad_sequence(seqs, batch_first=True)
     label_shape = batch_observations[0][1].shape
@@ -428,6 +428,7 @@ class ObservationIterator(Dataset):
       observations: A list of observations describing a dataset
       task: a Task object which takes Observations and constructs labels.
     """
+    print("trying to load from", self.name + '_labels.pkl')
     if os.path.exists(self.name + '_labels.pkl'):
       with open(self.name + '_labels.pkl', 'rb') as f:
         self.labels = pickle.load(f)
