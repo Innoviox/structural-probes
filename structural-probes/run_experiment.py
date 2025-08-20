@@ -199,7 +199,7 @@ def setup_new_experiment_dir(args, yaml_args, reuse_results_path):
   if reuse_results_path:
     new_root = reuse_results_path
     tqdm.write('Reusing old results directory at {}'.format(new_root))
-    if args.train_probe == -1:
+    if not hasattr(args, 'train_probe') or args.train_probe == -1:
       args.train_probe = 0
       tqdm.write('Setting train_probe to 0 to avoid squashing old params; '
           'explicitly set to 1 to override.')
